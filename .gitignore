@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*$py.class
+uv.lock
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.pyright/
+.venv/
