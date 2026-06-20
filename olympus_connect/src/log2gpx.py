@@ -3,14 +3,12 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
-TrackPoint = tuple[float, float, str, str]
 
-
-def read_log(fn: str) -> list[TrackPoint]:
+def read_log(fn: str) -> list[tuple[float, float, str, str]]:
     result = []
     line_no = 0
     with open(fn) as f:
-        for line in f:  # ; ponytail: replaces while+readline boilerplate
+        for line in f:
             line = line.strip()
             if not line:
                 break
@@ -68,7 +66,7 @@ def read_log(fn: str) -> list[TrackPoint]:
     return result
 
 
-def write_gpx(fn: str, track: list[TrackPoint]) -> None:
+def write_gpx(fn: str, track: list[tuple[float, float, str, str]]) -> None:
     ns = "http://www.topografix.com/GPX/1/1"
     xsi = "http://www.w3.org/2001/XMLSchema-instance"
     ET.register_namespace("", ns)

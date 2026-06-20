@@ -1,4 +1,5 @@
 import io
+import json
 import queue
 import socket
 import sys
@@ -17,7 +18,7 @@ class LiveViewReceiver:
         self.running = True
         self.img_queue = img_queue
         self.prev_sequence_number = 0
-        self.assembling_frame = False  # ; ponytail: inline init_frame
+        self.assembling_frame = False
         self.frame = b""
         self.extension = b""
 
@@ -43,13 +44,10 @@ class LiveViewReceiver:
     def decode_rtp(self, packet: bytes) -> tuple[int, int, bytes]:
         version = packet[0] >> 6
         assert version == 2
-        padding = bool(packet[0] & 32)
         extension = bool(packet[0] & 16)
         csrc_count = packet[0] & 15
         marker = bool(packet[1] & 128)
         sequence_number = (packet[2] << 8) + packet[3]
-        if padding:
-            packet = packet[: -packet[-1]]
         if extension:
             start = 14 + 4 * csrc_count
             extension_header_length = (packet[start] << 8) + packet[start + 1]
@@ -66,16 +64,14 @@ class LiveViewReceiver:
         if self.assembling_frame:
             self.frame += payload
             if (self.prev_sequence_number + 1) % 65536 != sequence_number:
-                self.assembling_frame = (
-                    False  # ; ponytail: inline init_frame(valid=False)
-                )
+                self.assembling_frame = False
                 self.frame = b""
                 self.extension = b""
         self.prev_sequence_number = sequence_number
         if marker:
             if self.frame:
                 self.process_frame(self.frame)
-            self.assembling_frame = True  # ; ponytail: inline init_frame()
+            self.assembling_frame = True
             self.frame = b""
             self.extension = b""
 
@@ -109,7 +105,7 @@ class LiveViewWindow:
         self.lvqty_list = ["0640x0480"]
         if "switch_cammode" in camera.commands:
             args = camera.commands["switch_cammode"].args
-            if args:  # ; ponytail: chained get keeps it flat
+            if args:
                 lvqty = ((args.get("mode") or {}).get("rec") or {}).get("lvqty")
                 if lvqty:
                     self.lvqty_list = list(lvqty)
@@ -124,30 +120,35 @@ class LiveViewWindow:
         self.lvqty_var.set(self.lvqty_cur)
         self.lvqty_var.trace_add("write", self.on_lvqty)
 
-        self.camprop_info: dict = {}  # ; ponytail: untyped dict keeps type-checker quiet
+        self.camprop_info: dict = {}
         camera.send_command("switch_cammode", mode="rec")
-        cam_props = camera.xml_response(
+        cam_props_xml = camera._parse_xml(
             camera.send_command("get_camprop", com="desc", propname="desclist")
         )
-        if isinstance(cam_props, list):
-            for prop in cam_props:
-                if prop["attribute"] != "getset":
-                    continue
-                values = prop["enum"].split()
-                index = values.index(prop["value"])
-                if index == -1:
-                    continue
-                variable = tkinter.IntVar()
-                variable.set(index)
-                variable.trace_add("write", self.on_camprop)
-                self.camprop_info[
-                    str(variable)
-                ] = {  # ; ponytail: dict replaces inner class
-                    "name": prop["propname"],
-                    "values": values,
-                    "cur_val": index,
-                    "variable": variable,
-                }
+        cam_props = []
+        if cam_props_xml is not None:
+            for prop in cam_props_xml:
+                d = {child.tag: child.text for child in prop}
+                cam_props.append(d)
+        for prop in cam_props:
+            if prop.get("attribute") != "getset":
+                continue
+            raw = prop.get("enum") or str()
+            values = raw.split()
+            pval = prop.get("value")
+            assert pval is not None
+            index = values.index(pval)
+            if index == -1:
+                continue
+            variable = tkinter.IntVar()
+            variable.set(index)
+            variable.trace_add("write", self.on_camprop)
+            self.camprop_info[str(variable)] = {
+                "name": prop["propname"],
+                "values": values,
+                "cur_val": index,
+                "variable": variable,
+            }
         camera.send_command("switch_cammode", mode="play")
 
         self.menubar = tkinter.Menu(self.window)
@@ -297,6 +298,7 @@ def serve_stream(
 
     cfg = get_config().get("server", {})
     ccfg = get_config().get("camera", {})
+    bcfg = get_config().get("bluetooth", {})
     if lvport is None:
         lvport = ccfg.get("live_port", 40000)
     if http_port is None:
@@ -316,14 +318,59 @@ def serve_stream(
         def do_GET(self):
             if self.path == "/stream":
                 self._stream_mjpeg()
+            elif self.path.startswith("/api"):
+                self._json_api()
             else:
                 self._serve_html()
+
+        def _json(self, data, status=200):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(data, indent=2).encode())
+
+        def _json_api(self):
+            if self.path == "/api":
+                self._json(
+                    {
+                        "endpoints": {
+                            "/api": "this help",
+                            "/api/info": "system info",
+                            "/api/bluetooth": "bluetooth PAN info",
+                            "/stream": "MJPEG live view",
+                            "/": "HTML viewer",
+                        }
+                    }
+                )
+            elif self.path == "/api/info":
+                hostname = socket.gethostname()
+                ip = self.client_address[0]
+                uptime = "N/A"
+                try:
+                    uptime = open("/proc/uptime").read().split()[0]
+                except OSError:
+                    pass
+                self._json({"hostname": hostname, "ip": ip, "uptime": uptime})
+            elif self.path == "/api/bluetooth":
+                pan_ip = bcfg.get("pan_ip", "192.168.44.1")
+                iface = bcfg.get("interface", "bt0")
+                self._json(
+                    {
+                        "interface": iface,
+                        "pan_ip": pan_ip,
+                        "client_ip": self.client_address[0],
+                        "client_port": self.client_address[1],
+                    }
+                )
+            else:
+                self._json({"error": "not found"}, 404)
 
         def _serve_html(self):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
-            self.wfile.write(b'<html><body><img src="/stream"/></body></html>')
+            self.wfile.write(b'<html><body><img src="/stream"></body></html>')
 
         def _stream_mjpeg(self):
             self.send_response(200)
@@ -345,7 +392,7 @@ def serve_stream(
                     break
 
         def log_message(self, format, *args):
-            pass  # ; ponytail: silence HTTP access logs
+            pass
 
     server = ThreadingHTTPServer((bind, http_port), _Handler)
     print(f"  MJPEG stream at http://0.0.0.0:{http_port}/", file=sys.stderr)

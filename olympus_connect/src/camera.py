@@ -12,12 +12,10 @@ import urllib.parse
 import urllib.error
 from http.client import HTTPResponse as _HTTPResponse
 
-_AnyResponse = (
-    _HTTPResponse | urllib.error.HTTPError
-)  # ; ponytail: both share the same duck-typed interface
+_AnyResponse = _HTTPResponse | urllib.error.HTTPError
 
 
-class _Response:  # ; ponytail: urllib adapter — drops requests dep
+class _Response:
     __slots__ = ("status_code", "headers", "url", "content", "text")
 
     def __init__(self, resp: _AnyResponse):
@@ -65,7 +63,6 @@ class OlympusCamera:
         self.DEFAULT_RES = cfg.get("live_resolution", "0640x0480")
 
         self.versions: dict[str, str] = {}
-        self.supported: set[str] = set()
         self.camera_info = None
         self._cammode = self.CamMode.UNKNOWN
         self._liveview_active = False
@@ -85,30 +82,28 @@ class OlympusCamera:
                             http_method.attrib["type"],
                             self.commandlist_cmds(http_method),
                         )
-            elif elem.tag == "support":
-                self.supported.add(elem.attrib["func"])
             elif "version" in elem.tag:
                 self.versions[elem.tag] = (elem.text or "").strip()
 
         print("  getting camera info...", file=sys.stderr)
-        info = self.xml_response(self.send_command("get_caminfo"))
-        if isinstance(info, list):
-            self.camera_info = {k: v for dct in info for k, v in dct.items()}
-        else:
-            self.camera_info = info
+        info_xml = self._parse_xml(self.send_command("get_caminfo"))
+        self.camera_info = (
+            {elem.tag: elem.text for elem in info_xml} if info_xml is not None else None
+        )
 
         self.send_command("switch_cammode", mode="rec")
-        cam_props = self.xml_response(
+        cam_props_xml = self._parse_xml(
             self.send_command("get_camprop", com="desc", propname="desclist")
         )
-        if not isinstance(cam_props, list):
-            cam_props = []
+        cam_props = []
+        if cam_props_xml is not None:
+            for prop in cam_props_xml:
+                d = {child.tag: child.text for child in prop}
+                cam_props.append(d)
         self.camprop_name2values = {
-            prop["propname"]: prop["enum"].split()
-            for prop in cam_props
-            if isinstance(prop, dict)
-            and prop.get("attribute") == "getset"
-            and "enum" in prop
+            d["propname"]: (d.get("enum") or " ").split()
+            for d in cam_props
+            if d.get("attribute") == "getset" and "enum" in d
         }
 
         print("  switching to play mode...", file=sys.stderr)
@@ -141,9 +136,7 @@ class OlympusCamera:
             cmds[cmd.attrib["name"].strip()] = self.commandlist_params(cmd)
         return cmds if cmds else None
 
-    def _request(
-        self, method: str, url: str, **kw
-    ) -> _Response:  # ; ponytail: urllib wrapper
+    def _request(self, method: str, url: str, **kw) -> _Response:
         if "params" in kw and kw["params"]:
             url += "?" + urllib.parse.urlencode(kw["params"])
         data = kw.get("data")
@@ -169,9 +162,7 @@ class OlympusCamera:
                     f"'{', '.join([k + '=' + v for k, v in args.items()])}': "
                     "missing entry 'post_data' for method 'post'."
                 )
-            post_data = args.pop(
-                "post_data"
-            )  # ; ponytail: pop avoids separate params variable
+            post_data = args.pop("post_data")
             headers = self.HEADERS.copy()
             if len(post_data) > 6 and post_data[:6] == b"<?xml ":
                 headers["Content-Type"] = "text/plain;charset=utf-8"
@@ -182,9 +173,9 @@ class OlympusCamera:
         if response.status_code in (200, 202):
             return response
         else:
-            err_xml = self.xml_response(response)
-            if isinstance(err_xml, dict):
-                msg = ", ".join([f"{key}={value}" for key, value in err_xml.items()])
+            err_xml = self._parse_xml(response)
+            if err_xml is not None:
+                msg = ", ".join(f"{elem.tag}={elem.text}" for elem in err_xml)
             else:
                 msg = response.text.replace("\r\n", "")
             raise ResultError(
@@ -205,9 +196,7 @@ class OlympusCamera:
         return True
 
     def _action_begin(self, cammode: CamMode) -> bool:
-        if self._execution_lock.acquire(
-            timeout=10
-        ):  # ; ponytail: timeout keeps misbehavior bounded
+        if self._execution_lock.acquire(timeout=10):
             self._liveview_restart = self._liveview_active
             self._switch_cammode(cammode)
             return True
@@ -220,12 +209,14 @@ class OlympusCamera:
 
     def get_camprop(self, propname: str) -> str:
         if self._action_begin(self.CamMode.RECORD):
-            result = self.xml_response(
+            xml = self._parse_xml(
                 self.send_command("get_camprop", com="get", propname=propname)
             )
             self._action_end()
-            assert isinstance(result, dict) and "value" in result
-            return result["value"]
+            assert xml is not None
+            elem = xml.find("value")
+            assert elem is not None and elem.text is not None
+            return elem.text
         return ""
 
     def set_camprop(self, propname: str, value: str) -> None:
@@ -242,34 +233,10 @@ class OlympusCamera:
             )
             self._action_end()
 
-    def xml_response(
-        self, response: _Response
-    ) -> dict[str, str] | list[dict[str, str]] | None:
-        if (
-            "Content-Type" in response.headers
-            and response.headers["Content-Type"] == "text/xml"
-        ):
-            xml = ElementTree.fromstring(response.text)
-            my_dict: dict[str, str] = {}
-            my_list: list[dict[str, str]] = self.xml2dict(xml, my_dict)
-            if not my_list:
-                return my_dict
-            return my_list[0] if len(my_list) == 1 else my_list
+    def _parse_xml(self, response: _Response) -> ElementTree.Element | None:
+        if response.headers.get("Content-Type") == "text/xml":
+            return ElementTree.fromstring(response.text)
         return None
-
-    def xml2dict(
-        self, xml: ElementTree.Element, parent: dict[str, str]
-    ) -> list[dict[str, str]]:
-        if xml.text and xml.text.strip():
-            parent[xml.tag] = xml.text.strip()
-            return []
-        results = []
-        params: dict[str, str] = {}
-        for elem in xml:
-            results += self.xml2dict(elem, params)
-        if params:
-            results.append(params)
-        return results
 
     def set_clock(self) -> None:
         if self._action_begin(self.CamMode.PLAY):
@@ -330,24 +297,15 @@ class OlympusCamera:
             urllib.request.Request(self.URL_PREFIX + dir[1:], headers=self.HEADERS)
         ).read()
 
-    def start_liveview(self, port: int, lvqty: str) -> list[str]:
+    def start_liveview(self, port: int, lvqty: str) -> None:
         print(f"  starting liveview (port {port}, res {lvqty})...", file=sys.stderr)
         if self._action_begin(self.CamMode.PLAY):
             self._switch_cammode(cammode=self.CamMode.RECORD, lvqty=lvqty)
             self._liveview_lvqty = lvqty
             self._liveview_port = port
-            xml = self.send_command(
-                "exec_takemisc", com="startliveview", port=port
-            ).text
+            self.send_command("exec_takemisc", com="startliveview", port=port)
             self._liveview_active = True
             self._action_end()
-            if xml and xml.startswith("<?xml "):
-                return [
-                    funcid.attrib["name"]
-                    for funcid in ElementTree.fromstring(xml)
-                    if funcid.tag == "funcid" and "name" in funcid.attrib
-                ]
-        return []
 
     def stop_liveview(self) -> None:
         if self._liveview_active:

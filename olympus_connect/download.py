@@ -26,11 +26,7 @@ def download_photos(
             if not (daterange[0] <= file_date <= daterange[1]):
                 continue
 
-        local_dir = (
-            os.path.join(os.path.expanduser("~"), "Pictures", cam_file.date_time[:4])
-            if output_dir is None
-            else output_dir
-        )
+        local_dir = output_dir
 
         if not os.path.exists(local_dir):
             try:

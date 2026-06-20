@@ -9,6 +9,10 @@
     "http_port": 8080,
     "bind": "0.0.0.0"
   },
+  "bluetooth": {
+    "interface": "bt0",
+    "pan_ip": "192.168.44.1"
+  },
   "download": {
     "output": "./camera-output"
   }
