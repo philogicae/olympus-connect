@@ -7,10 +7,14 @@ from .src.camera import OlympusCamera
 
 def download_photos(
     camera: OlympusCamera,
-    output_dir: str,
+    output_dir: str | None = None,
     daterange: tuple = (None, None),
     extension: str | None = None,
 ) -> None:
+    from .config import get_config
+
+    if output_dir is None:
+        output_dir = get_config().get("download", {}).get("output", "./camera-output")
     for cam_file in camera.list_images():
         if extension is not None and not cam_file.file_name.lower().endswith(
             extension.lower()
@@ -46,27 +50,25 @@ def download_photos(
             continue
 
         image = camera.download_image(cam_file.file_name)
-        if image is not None:
-            assert len(image) == cam_file.file_size
-            try:
-                with open(local_file, "wb") as f:
-                    f.write(image)
-            except Exception as e:
-                print(
-                    f"Failed to download '{cam_file.file_name}' to "
-                    f"'{msg_file}': {str(e)}."
-                )
-                try:
-                    os.remove(local_file)
-                except OSError:
-                    pass
-                continue
-
+        assert len(image) == cam_file.file_size
+        try:
+            with open(local_file, "wb") as f:
+                f.write(image)
+        except Exception as e:
             print(
-                f"File '{cam_file.file_name}' of {cam_file.file_size:,} bytes"
-                f" from {dt} downloaded to '{msg_file}'."
+                f"Failed to download '{cam_file.file_name}' to '{msg_file}': {str(e)}."
             )
-            os.utime(local_file, (tim_epoch, tim_epoch))
+            try:
+                os.remove(local_file)
+            except OSError:
+                pass
+            continue
+
+        print(
+            f"File '{cam_file.file_name}' of {cam_file.file_size:,} bytes"
+            f" from {dt} downloaded to '{msg_file}'."
+        )
+        os.utime(local_file, (tim_epoch, tim_epoch))
 
 
 def parse_date(date_string: str) -> datetime.date:

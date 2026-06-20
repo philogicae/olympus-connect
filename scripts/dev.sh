@@ -33,3 +33,6 @@ if [ "$sh_count" -gt 0 ]; then
         echo "All bash files passed shellcheck!"
     fi
 fi
+
+# Reinstall package so `olympus-camera` command picks up changes
+uv tool install --reinstall .

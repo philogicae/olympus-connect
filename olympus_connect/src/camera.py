@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import sys
 import time
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
@@ -51,14 +52,18 @@ class OlympusCamera:
         file_size: int
         date_time: str
 
-    URL_PREFIX = "http://192.168.0.10/"
-    HEADERS = {"Host": "192.168.0.10", "User-Agent": "OI.Share v2"}
     ANY_PARAMETER = "*"
     EMPTY_PARAMETERS: dict[str, dict | None] = {ANY_PARAMETER: None}
-    DEFAULT_PORT = 40000
-    DEFAULT_RES = "0640x0480"
 
     def __init__(self):
+        from ..config import get_config
+
+        cfg = get_config().get("camera", {})
+        self.URL_PREFIX = f"http://{cfg.get('host', '192.168.0.10')}/"
+        self.HEADERS = {"User-Agent": cfg.get("user_agent", "OI.Share v2")}
+        self.DEFAULT_PORT = cfg.get("live_port", 40000)
+        self.DEFAULT_RES = cfg.get("live_resolution", "0640x0480")
+
         self.versions: dict[str, str] = {}
         self.supported: set[str] = set()
         self.camera_info = None
@@ -69,10 +74,8 @@ class OlympusCamera:
         self._liveview_port = self.DEFAULT_PORT
         self._execution_lock = Semaphore()
         self.commands = {"get_commandlist": self.CmdDescr("get", None)}
-
+        print("  fetching command list...", file=sys.stderr)
         response = self.send_command("get_commandlist")
-        if response is None:
-            return
 
         for elem in ElementTree.fromstring(response.text):
             if elem.tag == "cgi":
@@ -87,6 +90,7 @@ class OlympusCamera:
             elif "version" in elem.tag:
                 self.versions[elem.tag] = (elem.text or "").strip()
 
+        print("  getting camera info...", file=sys.stderr)
         info = self.xml_response(self.send_command("get_caminfo"))
         if isinstance(info, list):
             self.camera_info = {k: v for dct in info for k, v in dct.items()}
@@ -107,6 +111,7 @@ class OlympusCamera:
             and "enum" in prop
         }
 
+        print("  switching to play mode...", file=sys.stderr)
         self._switch_cammode(self.CamMode.PLAY)
 
     def commandlist_params(self, parent: ElementTree.Element) -> dict[str, dict | None]:
@@ -153,6 +158,7 @@ class OlympusCamera:
     def send_command(self, command: str, **args) -> _Response:
         url = f"{self.URL_PREFIX}{command}.cgi"
         method = self.commands[command].method
+        print(f"  >> {method.upper()} {command}.cgi {args or ''}", file=sys.stderr)
         if method == "get":
             response = self._request("GET", url, params=args or None)
         else:
@@ -325,6 +331,7 @@ class OlympusCamera:
         ).read()
 
     def start_liveview(self, port: int, lvqty: str) -> list[str]:
+        print(f"  starting liveview (port {port}, res {lvqty})...", file=sys.stderr)
         if self._action_begin(self.CamMode.PLAY):
             self._switch_cammode(cammode=self.CamMode.RECORD, lvqty=lvqty)
             self._liveview_lvqty = lvqty

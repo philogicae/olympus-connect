@@ -1,6 +1,7 @@
 import io
 import queue
 import socket
+import sys
 import threading
 import tkinter
 
@@ -88,7 +89,12 @@ class LiveViewReceiver:
 class LiveViewWindow:
     UPDATE_INTERVAL = 25
 
-    def __init__(self, camera: OlympusCamera, port: int = 40000):
+    def __init__(self, camera: OlympusCamera, port: int | None = None):
+        from .config import get_config
+
+        if port is None:
+            port = get_config().get("camera", {}).get("live_port", 40000)
+        print("  creating tkinter window...", file=sys.stderr)
         self.power_off = False
         self.camera = camera
         self.port = port
@@ -176,10 +182,12 @@ class LiveViewWindow:
 
         camera.start_liveview(port=self.port, lvqty=self.lvqty_list[self.lvqty_cur])
 
+        print("  binding UDP listener on port", port, "...", file=sys.stderr)
         udp_client = LiveViewReceiver(self.img_queue)
         thread = threading.Thread(target=udp_client.receive_packets, args=[port])
         thread.start()
 
+        print("  waiting for first frame...", file=sys.stderr)
         self.img = self.next_image()
         self.width = self.img.width()
         self.height = self.img.height()
@@ -279,3 +287,73 @@ class LiveViewWindow:
     def power_off_and_exit(self):
         self.power_off = True
         self.window.destroy()
+
+
+def serve_stream(
+    camera: OlympusCamera, lvport: int | None = None, http_port: int | None = None
+):
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    from .config import get_config
+
+    cfg = get_config().get("server", {})
+    ccfg = get_config().get("camera", {})
+    if lvport is None:
+        lvport = ccfg.get("live_port", 40000)
+    if http_port is None:
+        http_port = cfg.get("http_port", 8080)
+    bind = cfg.get("bind", "0.0.0.0")
+    res = ccfg.get("live_resolution", "0640x0480")
+
+    q: queue.SimpleQueue = queue.SimpleQueue()
+
+    print(f"  starting liveview on port {lvport}...", file=sys.stderr)
+    camera.start_liveview(port=lvport, lvqty=res)
+    receiver = LiveViewReceiver(q)
+    t = threading.Thread(target=receiver.receive_packets, args=[lvport], daemon=True)
+    t.start()
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/stream":
+                self._stream_mjpeg()
+            else:
+                self._serve_html()
+
+        def _serve_html(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b'<html><body><img src="/stream"/></body></html>')
+
+        def _stream_mjpeg(self):
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", "multipart/x-mixed-replace; boundary=frame"
+            )
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                try:
+                    jpeg, _ = q.get(timeout=1)
+                except queue.Empty:
+                    continue
+                try:
+                    self.wfile.write(
+                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                    )
+                except OSError:
+                    break
+
+        def log_message(self, format, *args):
+            pass  # ; ponytail: silence HTTP access logs
+
+    server = ThreadingHTTPServer((bind, http_port), _Handler)
+    print(f"  MJPEG stream at http://0.0.0.0:{http_port}/", file=sys.stderr)
+    print("  Press Ctrl-C to stop.", file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    server.shutdown()
+    receiver.shut_down()
+    camera.stop_liveview()

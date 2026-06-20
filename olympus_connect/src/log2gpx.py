@@ -110,11 +110,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    for fn in args.log:
-        track = read_log(fn)
-        if len(track) == 0:
-            print(f"No GPS track found in '{fn}'.", file=sys.stderr)
-        else:
-            outfn = os.path.splitext(fn)[0] + ".gpx"
-            print(f"Converting '{fn} to '{outfn}'.")
-            write_gpx(outfn, track)
+    try:
+        for fn in args.log:
+            track = read_log(fn)
+            if len(track) == 0:
+                print(f"No GPS track found in '{fn}'.", file=sys.stderr)
+            else:
+                outfn = os.path.splitext(fn)[0] + ".gpx"
+                print(f"Converting '{fn} to '{outfn}'.")
+                write_gpx(outfn, track)
+    except KeyboardInterrupt:
+        sys.exit(130)

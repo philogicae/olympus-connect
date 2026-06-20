@@ -4,7 +4,7 @@ version = '1.0.0'
 authors = [
   { name='philogicae' },
 ]
-description = 'Connect to wifi-enabled Olympus camera, show liveview, set the clock, take pictures, download images, change settings, turn it off.'
+description = 'Control Olympus wifi cameras: shoot, live view, download, set clock, power off, serve MJPEG stream.'
 readme = 'README.md'
 requires-python = '>=3.14'
 classifiers = [

@@ -3,7 +3,8 @@ import sys
 
 from .src.camera import OlympusCamera, ResultError
 from .download import download_photos, parse_date
-from .liveview import LiveViewWindow
+from .liveview import LiveViewWindow, serve_stream
+from .config import get_config
 
 
 def user_command(camera: OlympusCamera, cmd: str) -> bool:
@@ -61,7 +62,7 @@ def main() -> None:
     )
     parser.add_argument("--shoot", "-S", action="store_true", help="Take a picture.")
     parser.add_argument(
-        "--liveview",
+        "--live",
         "-L",
         action="store_true",
         help="Show live camera stream. Close "
@@ -72,8 +73,18 @@ def main() -> None:
         "--port",
         "-P",
         type=int,
-        default=40000,
-        help="UPD port for liveview (default: 40000).",
+        default=None,
+        help="UDP port for live view.",
+    )
+    parser.add_argument(
+        "--serve",
+        "-s",
+        type=int,
+        nargs="?",
+        const=None,
+        default=None,
+        metavar="PORT",
+        help="Serve MJPEG stream over HTTP (port from config.json or 8080). Headless — no GUI needed.",
     )
     parser.add_argument(
         "--cmd",
@@ -89,25 +100,54 @@ def main() -> None:
         if start > end:
             parser.error("Start date must be before end date")
 
-    camera = OlympusCamera()
-    camera.report_model()
+    if not any(
+        [
+            args.set_clock,
+            args.cmd,
+            args.shoot,
+            args.live,
+            args.download,
+            args.power_off,
+            args.serve,
+        ]
+    ):
+        parser.print_help()
+        return
 
-    if args.set_clock:
-        camera.set_clock()
+    try:
+        print(
+            f"Connecting to {get_config().get('camera', {}).get('host', '192.168.0.10')}...",
+            file=sys.stderr,
+        )
+        camera = OlympusCamera()
+        camera.report_model()
 
-    if args.cmd:
-        for cmd in args.cmd:
-            if user_command(camera, cmd):
-                break
+        if args.set_clock:
+            print("Setting clock...", file=sys.stderr)
+            camera.set_clock()
 
-    if args.shoot:
-        camera.take_picture()
+        if args.cmd:
+            for cmd in args.cmd:
+                if user_command(camera, cmd):
+                    break
 
-    if args.liveview:
-        LiveViewWindow(camera, args.port)
+        if args.shoot:
+            print("Taking picture...", file=sys.stderr)
+            camera.take_picture()
+            print("Done.", file=sys.stderr)
 
-    if args.download:
-        download_photos(camera, args.output, args.date_range, args.extension)
+        if args.live:
+            print("Opening live view window...", file=sys.stderr)
+            LiveViewWindow(camera, args.port)
 
-    if args.power_off:
-        camera.send_command("exec_pwoff")
+        if args.serve:
+            serve_stream(camera, args.port, args.serve)
+
+        if args.download:
+            download_photos(camera, args.output, args.date_range, args.extension)
+
+        if args.power_off:
+            print("Powering off...", file=sys.stderr)
+            camera.send_command("exec_pwoff")
+    except KeyboardInterrupt:
+        sys.exit(130)
