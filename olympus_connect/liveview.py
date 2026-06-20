@@ -5,10 +5,30 @@ import socket
 import sys
 import threading
 import tkinter
+import warnings
 
 from PIL import Image, ImageTk
 
 from .src.camera import OlympusCamera
+
+
+def compress_jpeg(data: bytes, quality: int = 85, scale: float = 1.0) -> bytes:
+    if quality >= 95 and scale >= 1.0:
+        return data
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            img = Image.open(io.BytesIO(data))
+            img.load()
+    except Exception:
+        return data
+    if scale < 1.0:
+        w = max(1, int(img.width * scale))
+        h = max(1, int(img.height * scale))
+        img = img.resize((w, h), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    return buf.getvalue()
 
 
 class LiveViewReceiver:
@@ -237,6 +257,11 @@ class LiveViewWindow:
             )
 
         jpeg, extension = jpeg_and_extension
+        from .config import get_config
+
+        q = get_config().get("server", {}).get("jpeg_quality", 85)
+        s = get_config().get("server", {}).get("jpeg_scale", 1.0)
+        jpeg = compress_jpeg(jpeg, q, s)
         orientation = self.get_orientation(extension)
         if orientation is None or orientation == 1:
             return ImageTk.PhotoImage(data=jpeg)
@@ -291,7 +316,11 @@ class LiveViewWindow:
 
 
 def serve_stream(
-    camera: OlympusCamera, lvport: int | None = None, http_port: int | None = None
+    camera: OlympusCamera,
+    lvport: int | None = None,
+    http_port: int | None = None,
+    jpeg_quality: int | None = None,
+    jpeg_scale: float | None = None,
 ):
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
     from .config import get_config
@@ -305,6 +334,11 @@ def serve_stream(
         http_port = cfg.get("http_port", 8080)
     bind = cfg.get("bind", "0.0.0.0")
     res = ccfg.get("live_resolution", "0640x0480")
+
+    jpeg_quality = (
+        jpeg_quality if jpeg_quality is not None else cfg.get("jpeg_quality", 85)
+    )
+    jpeg_scale = jpeg_scale if jpeg_scale is not None else cfg.get("jpeg_scale", 1.0)
 
     q: queue.SimpleQueue = queue.SimpleQueue()
 
@@ -370,7 +404,20 @@ def serve_stream(
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
-            self.wfile.write(b'<html><body><img src="/stream"></body></html>')
+            self.wfile.write(b"""<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000}
+img{display:block;width:100%;height:100%;object-fit:contain}
+</style>
+</head>
+<body>
+<img src="/stream">
+</body>
+</html>""")
 
         def _stream_mjpeg(self):
             self.send_response(200)
@@ -384,9 +431,12 @@ def serve_stream(
                     jpeg, _ = q.get(timeout=1)
                 except queue.Empty:
                     continue
+                compressed = compress_jpeg(jpeg, jpeg_quality, jpeg_scale)
                 try:
                     self.wfile.write(
-                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                        + compressed
+                        + b"\r\n"
                     )
                 except OSError:
                     break

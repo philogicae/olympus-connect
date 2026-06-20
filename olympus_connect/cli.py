@@ -31,6 +31,9 @@ def user_command(camera: OlympusCamera, cmd: str) -> bool:
     return False
 
 
+_SERVE_DEFAULT = object()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", "-o", help="Local directory for downloaded photos.")
@@ -82,9 +85,23 @@ def main() -> None:
         type=int,
         nargs="?",
         const=None,
-        default=None,
+        default=_SERVE_DEFAULT,
         metavar="PORT",
         help="Serve MJPEG stream over HTTP (port from config.json or 8080). Headless — no GUI needed.",
+    )
+    parser.add_argument(
+        "--quality",
+        "-Q",
+        type=int,
+        default=None,
+        help="JPEG compression quality 1-100 (lower = smaller, faster). Default 85.",
+    )
+    parser.add_argument(
+        "--scale",
+        "-R",
+        type=float,
+        default=None,
+        help="Downscale factor (e.g. 0.5 for half resolution). Default 1.0.",
     )
     parser.add_argument(
         "--cmd",
@@ -108,7 +125,7 @@ def main() -> None:
             args.live,
             args.download,
             args.power_off,
-            args.serve,
+            args.serve is not _SERVE_DEFAULT,
         ]
     ):
         parser.print_help()
@@ -140,8 +157,8 @@ def main() -> None:
             print("Opening live view window...", file=sys.stderr)
             LiveViewWindow(camera, args.port)
 
-        if args.serve:
-            serve_stream(camera, args.port, args.serve)
+        if args.serve is not _SERVE_DEFAULT:
+            serve_stream(camera, args.port, args.serve, args.quality, args.scale)
 
         if args.download:
             download_photos(camera, args.output, args.date_range, args.extension)

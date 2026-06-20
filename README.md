@@ -27,6 +27,8 @@ olympus-camera --serve
 | `--cmd "get_camprop com=get propname=whitebalance"` | Arbitrary command |
 | `--output` / `-o` | Download directory |
 | `--port` / `-P` | UDP port for live view |
+| `--quality` / `-Q` | JPEG compression quality 1–100 (default 85) |
+| `--scale` / `-R` | Downscale factor e.g. `0.5` for half resolution (default 1.0) |
 
 | Binary | Action |
 |--------|--------|
@@ -35,9 +37,11 @@ olympus-camera --serve
 ## `--serve` endpoints
 
 ```
-olympus-camera --serve           # port from config or 8080
-olympus-camera --serve 9090      # explicit port
-olympus-camera -s 9090 -P 40001  # custom UDP + HTTP port
+olympus-camera --serve              # port from config or 8080
+olympus-camera --serve 9090         # explicit port
+olympus-camera -s 9090 -P 40001     # custom UDP + HTTP port
+olympus-camera -s -Q 50             # lower JPEG quality for slower links
+olympus-camera -s -Q 75 -R 0.5     # half resolution at good quality
 ```
 
 | Endpoint | Returns |
@@ -73,7 +77,8 @@ tkinter window with **File** (take picture, set clock, exit), **View** (resoluti
 {
   "camera": { "host": "192.168.0.10", "user_agent": "OI.Share v2",
               "live_port": 40000, "live_resolution": "0640x0480" },
-  "server": { "http_port": 8080, "bind": "0.0.0.0" },
+  "server": { "http_port": 8080, "bind": "0.0.0.0",
+              "jpeg_quality": 75, "jpeg_scale": 1.0 },
   "bluetooth": { "interface": "bt0", "pan_ip": "192.168.44.1" },
   "download": { "output": "./camera-output" }
 }
@@ -86,6 +91,8 @@ tkinter window with **File** (take picture, set clock, exit), **View** (resoluti
 | `camera.live_resolution` | Camera resolution |
 | `server.http_port` | Default `--serve` port |
 | `server.bind` | Interface to bind (`0.0.0.0` = all including BT PAN) |
+| `server.jpeg_quality` | JPEG re-compression quality 1–100 (default 85) |
+| `server.jpeg_scale` | Downscale factor (default 1.0) |
 | `bluetooth.interface` | BT PAN network interface |
 | `bluetooth.pan_ip` | BT PAN IP for `/api/bluetooth` |
 | `download.output` | Download directory |
@@ -105,7 +112,7 @@ Requires Python ≥ 3.14. tkinter needed for `--live` (`python3-tk` on Debian/Ub
 
 ## How it works
 
-Camera exposes `http://192.168.0.10/` (OPC Protocol 1.0a). Fetches `get_commandlist.cgi` to discover capabilities, sends GET/POST for commands, receives live view as RTP/MJPEG over UDP, serves frames as MJPEG over HTTP. Downloads are plain HTTP (camera is a file server).
+Camera exposes `http://192.168.0.10/` (OPC Protocol 1.0a). Fetches `get_commandlist.cgi` to discover capabilities, sends GET/POST for commands, receives live view as RTP/MJPEG over UDP, optionally re-encodes JPEGs at lower quality/scale to save bandwidth, and serves frames as MJPEG over HTTP with a responsive fullscreen HTML page. Downloads are plain HTTP (camera is a file server).
 
 ## Development
 

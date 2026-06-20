@@ -7,7 +7,9 @@
   },
   "server": {
     "http_port": 8080,
-    "bind": "0.0.0.0"
+    "bind": "0.0.0.0",
+    "jpeg_quality": 75,
+    "jpeg_scale": 1.0
   },
   "bluetooth": {
     "interface": "bt0",
