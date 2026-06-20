@@ -29,7 +29,7 @@ def compress_jpeg(
         h = max(1, int(img.height * scale))
         img = img.resize((w, h), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=optimize, subsampling="420")
+    img.save(buf, format="JPEG", quality=quality, optimize=optimize, subsampling=2)
     return buf.getvalue()
 
 
@@ -115,7 +115,7 @@ class LiveViewReceiver:
             compressed = compress_jpeg(
                 frame, self.jpeg_quality, self.jpeg_scale, self.jpeg_optimize
             )
-            while self.img_queue.qsize() >= self.MAX_QUEUE_SIZE:
+            if self.img_queue.qsize() >= self.MAX_QUEUE_SIZE:
                 self.img_queue.get()
             self.img_queue.put((compressed, self.extension))
 

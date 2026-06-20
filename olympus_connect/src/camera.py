@@ -6,7 +6,7 @@ import time
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from enum import Enum
-from threading import Semaphore
+from threading import Lock
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -69,7 +69,7 @@ class OlympusCamera:
         self._liveview_restart = False
         self._liveview_lvqty = self.DEFAULT_RES
         self._liveview_port = self.DEFAULT_PORT
-        self._execution_lock = Semaphore()
+        self._execution_lock = Lock()
         self.commands = {"get_commandlist": self.CmdDescr("get", None)}
         print("  fetching command list...", file=sys.stderr)
         response = self.send_command("get_commandlist")
@@ -185,7 +185,7 @@ class OlympusCamera:
                 response,
             )
 
-    def _switch_cammode(self, cammode: CamMode, lvqty: str | None = None) -> bool:
+    def _switch_cammode(self, cammode: CamMode, lvqty: str | None = None) -> None:
         if self._cammode.value != cammode.value and cammode != self.CamMode.UNKNOWN:
             kwargs = {"mode": cammode.value}
             if lvqty is not None:
@@ -193,7 +193,6 @@ class OlympusCamera:
             self.send_command("switch_cammode", **kwargs)
             self._cammode = cammode
             self._liveview_active = False
-        return True
 
     def _action_begin(self, cammode: CamMode) -> bool:
         if self._execution_lock.acquire(timeout=10):
