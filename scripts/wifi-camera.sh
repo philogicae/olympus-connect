@@ -7,34 +7,44 @@ HOME_SSID="${OLYMPUS_HOME_SSID:-}"
 
 usage() {
   echo "Usage: $0 [--camera|--home|--status|--auto]"
-  echo "  --camera   Switch WiFi to camera"
+  echo "  --camera   Switch WiFi to camera (sets higher priority too)"
   echo "  --home     Switch WiFi back to home network"
   echo "  --status   Show current WiFi connection"
-  echo "  --auto     Set camera WiFi higher priority (auto-switch)"
+  echo "  --auto     Set camera WiFi higher priority for auto-switch"
   echo ""
   echo "Env vars: OLYMPUS_CAM_SSID, OLYMPUS_CAM_PASS, OLYMPUS_HOME_SSID"
   exit 1
 }
 
+ensure_conn() {
+  local ssid="$1" pass="$2"
+  if ! nmcli -t -f NAME con show | grep -qxF "$ssid"; then
+    [ -n "$pass" ] || { echo "Password required for $ssid"; exit 1; }
+    sudo nmcli device wifi connect "$ssid" password "$pass"
+  fi
+}
+
 case "${1:-}" in
   --camera)
-    [ -n "$CAM_PASS" ] || { echo "Set OLYMPUS_CAM_PASS"; exit 1; }
-    sudo nmcli device wifi connect "$CAM_SSID" password "$CAM_PASS"
+    ensure_conn "$CAM_SSID" "$CAM_PASS"
+    ensure_conn "$HOME_SSID"
+    sudo nmcli con modify "$CAM_SSID" connection.autoconnect yes connection.autoconnect-priority 100
+    sudo nmcli con modify "$HOME_SSID" connection.autoconnect yes connection.autoconnect-priority 50
+    sudo nmcli con up "$CAM_SSID"
     ;;
   --home)
-    [ -n "$HOME_SSID" ] || { echo "Set OLYMPUS_HOME_SSID"; exit 1; }
-    sudo nmcli device wifi connect "$HOME_SSID"
+    ensure_conn "$HOME_SSID"
+    sudo nmcli con up "$HOME_SSID"
     ;;
   --status)
     nmcli -t -f ACTIVE,SSID,DEVICE device wifi | grep '^yes'
     ;;
   --auto)
-    [ -n "$CAM_PASS" ] || { echo "Set OLYMPUS_CAM_PASS"; exit 1; }
-    [ -n "$HOME_SSID" ] || { echo "Set OLYMPUS_HOME_SSID"; exit 1; }
-    sudo nmcli con modify "$CAM_SSID" connection.autoconnect-priority 100 2>/dev/null || \
-      sudo nmcli device wifi connect "$CAM_SSID" password "$CAM_PASS"
-    sudo nmcli con modify "$HOME_SSID" connection.autoconnect-priority 50
-    echo "Camera WiFi has priority. RPi will auto-switch when camera is on."
+    ensure_conn "$CAM_SSID" "$CAM_PASS"
+    ensure_conn "$HOME_SSID"
+    sudo nmcli con modify "$CAM_SSID" connection.autoconnect yes connection.autoconnect-priority 100
+    sudo nmcli con modify "$HOME_SSID" connection.autoconnect yes connection.autoconnect-priority 50
+    echo "Camera WiFi has priority. Runs 'sudo nmcli con up \"$CAM_SSID\"'."
     ;;
   *)
     usage

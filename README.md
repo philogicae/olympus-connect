@@ -76,9 +76,9 @@ tkinter window with **File** (take picture, set clock, exit), **View** (resoluti
 ```json
 {
   "camera": { "host": "192.168.0.10", "user_agent": "OI.Share v2",
-              "live_port": 40000, "live_resolution": "0640x0480" },
+              "live_port": 40000, "live_resolution": "1920x1440" },
   "server": { "http_port": 8080, "bind": "0.0.0.0",
-              "jpeg_quality": 75, "jpeg_scale": 1.0 },
+              "jpeg_quality": 75, "jpeg_scale": 1.0, "jpeg_optimize": true },
   "bluetooth": { "interface": "bt0", "pan_ip": "192.168.44.1" },
   "download": { "output": "./camera-output" }
 }
@@ -93,6 +93,7 @@ tkinter window with **File** (take picture, set clock, exit), **View** (resoluti
 | `server.bind` | Interface to bind (`0.0.0.0` = all including BT PAN) |
 | `server.jpeg_quality` | JPEG re-compression quality 1–100 (default 85) |
 | `server.jpeg_scale` | Downscale factor (default 1.0) |
+| `server.jpeg_optimize` | JPEG Huffman optimization (smaller files, slower encode) |
 | `bluetooth.interface` | BT PAN network interface |
 | `bluetooth.pan_ip` | BT PAN IP for `/api/bluetooth` |
 | `download.output` | Download directory |

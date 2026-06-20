@@ -12,7 +12,9 @@ from PIL import Image, ImageTk
 from .src.camera import OlympusCamera
 
 
-def compress_jpeg(data: bytes, quality: int = 85, scale: float = 1.0) -> bytes:
+def compress_jpeg(
+    data: bytes, quality: int = 85, scale: float = 1.0, optimize: bool = True
+) -> bytes:
     if quality >= 95 and scale >= 1.0:
         return data
     try:
@@ -27,16 +29,25 @@ def compress_jpeg(data: bytes, quality: int = 85, scale: float = 1.0) -> bytes:
         h = max(1, int(img.height * scale))
         img = img.resize((w, h), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    img.save(buf, format="JPEG", quality=quality, optimize=optimize, subsampling="420")
     return buf.getvalue()
 
 
 class LiveViewReceiver:
     MAX_QUEUE_SIZE = 50
 
-    def __init__(self, img_queue: queue.SimpleQueue):
+    def __init__(
+        self,
+        img_queue: queue.SimpleQueue,
+        jpeg_quality: int = 85,
+        jpeg_scale: float = 1.0,
+        jpeg_optimize: bool = True,
+    ):
         self.running = True
         self.img_queue = img_queue
+        self.jpeg_quality = jpeg_quality
+        self.jpeg_scale = jpeg_scale
+        self.jpeg_optimize = jpeg_optimize
         self.prev_sequence_number = 0
         self.assembling_frame = False
         self.frame = b""
@@ -49,6 +60,10 @@ class LiveViewReceiver:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.bind(("", port))
             sock.settimeout(1)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)
+            except OSError:
+                pass
             while True:
                 try:
                     packet = sock.recv(4096)
@@ -97,9 +112,12 @@ class LiveViewReceiver:
 
     def process_frame(self, frame: bytes) -> None:
         if frame[:2] == b"\xff\xd8" and frame[-2:] == b"\xff\xd9":
+            compressed = compress_jpeg(
+                frame, self.jpeg_quality, self.jpeg_scale, self.jpeg_optimize
+            )
             while self.img_queue.qsize() >= self.MAX_QUEUE_SIZE:
                 self.img_queue.get()
-            self.img_queue.put((frame, self.extension))
+            self.img_queue.put((compressed, self.extension))
 
 
 class LiveViewWindow:
@@ -204,7 +222,13 @@ class LiveViewWindow:
         camera.start_liveview(port=self.port, lvqty=self.lvqty_list[self.lvqty_cur])
 
         print("  binding UDP listener on port", port, "...", file=sys.stderr)
-        udp_client = LiveViewReceiver(self.img_queue)
+        cfg = get_config().get("server", {})
+        udp_client = LiveViewReceiver(
+            self.img_queue,
+            cfg.get("jpeg_quality", 85),
+            cfg.get("jpeg_scale", 1.0),
+            cfg.get("jpeg_optimize", True),
+        )
         thread = threading.Thread(target=udp_client.receive_packets, args=[port])
         thread.start()
 
@@ -249,19 +273,13 @@ class LiveViewWindow:
 
     def next_image(self) -> ImageTk.PhotoImage:
         try:
-            jpeg_and_extension = self.img_queue.get(timeout=4.0)
+            jpeg, extension = self.img_queue.get(timeout=4.0)
         except queue.Empty:
             raise TimeoutError(
                 "Timeout while waiting for imagedata from camera. Maybe you need to check your "
                 "firewall settings for incoming UDP traffic (from 192.168.0.10)."
             )
 
-        jpeg, extension = jpeg_and_extension
-        from .config import get_config
-
-        q = get_config().get("server", {}).get("jpeg_quality", 85)
-        s = get_config().get("server", {}).get("jpeg_scale", 1.0)
-        jpeg = compress_jpeg(jpeg, q, s)
         orientation = self.get_orientation(extension)
         if orientation is None or orientation == 1:
             return ImageTk.PhotoImage(data=jpeg)
@@ -321,6 +339,7 @@ def serve_stream(
     http_port: int | None = None,
     jpeg_quality: int | None = None,
     jpeg_scale: float | None = None,
+    jpeg_optimize: bool | None = None,
 ):
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
     from .config import get_config
@@ -339,12 +358,15 @@ def serve_stream(
         jpeg_quality if jpeg_quality is not None else cfg.get("jpeg_quality", 85)
     )
     jpeg_scale = jpeg_scale if jpeg_scale is not None else cfg.get("jpeg_scale", 1.0)
+    jpeg_optimize = (
+        jpeg_optimize if jpeg_optimize is not None else cfg.get("jpeg_optimize", True)
+    )
 
     q: queue.SimpleQueue = queue.SimpleQueue()
 
     print(f"  starting liveview on port {lvport}...", file=sys.stderr)
     camera.start_liveview(port=lvport, lvqty=res)
-    receiver = LiveViewReceiver(q)
+    receiver = LiveViewReceiver(q, jpeg_quality, jpeg_scale, jpeg_optimize)
     t = threading.Thread(target=receiver.receive_packets, args=[lvport], daemon=True)
     t.start()
 
@@ -431,12 +453,9 @@ img{display:block;width:100%;height:100%;object-fit:contain}
                     jpeg, _ = q.get(timeout=1)
                 except queue.Empty:
                     continue
-                compressed = compress_jpeg(jpeg, jpeg_quality, jpeg_scale)
                 try:
                     self.wfile.write(
-                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-                        + compressed
-                        + b"\r\n"
+                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
                     )
                 except OSError:
                     break
