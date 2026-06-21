@@ -413,28 +413,58 @@ def serve_stream(
     raw_queue: queue.SimpleQueue = queue.SimpleQueue()
     latest = _LatestFrame()
     bypass_compress = jpeg_quality >= 95 and jpeg_scale >= 1.0
-
-    print(f"  starting liveview on port {lvport}...", file=sys.stderr)
-    camera.start_liveview(port=lvport, lvqty=res)
-    if bypass_compress:
-        receiver = LiveViewReceiver(frame_callback=latest.set)
-    else:
-        receiver = LiveViewReceiver(raw_queue, raw_mode=True)
-    t = threading.Thread(target=receiver.receive_packets, args=[lvport], daemon=True)
-    t.start()
+    frame_interval = 1.0 / max_fps
 
     running = threading.Event()
     running.set()
-    if not bypass_compress:
-        threading.Thread(
-            target=_compress_worker,
-            args=[running, raw_queue, latest, jpeg_quality, jpeg_scale],
-            daemon=True,
-        ).start()
+    stream_lock = threading.Lock()
+    stream_clients = 0
+    receiver: LiveViewReceiver | None = None
 
-    frame_interval = 1.0 / max_fps
+    def _start_streaming() -> None:
+        nonlocal receiver
+        print(f"  starting liveview on port {lvport}...", file=sys.stderr)
+        camera.start_liveview(port=lvport, lvqty=res)
+        if bypass_compress:
+            receiver = LiveViewReceiver(frame_callback=latest.set)
+        else:
+            receiver = LiveViewReceiver(raw_queue, raw_mode=True)
+        threading.Thread(
+            target=receiver.receive_packets, args=[lvport], daemon=True
+        ).start()
+        if not bypass_compress:
+            threading.Thread(
+                target=_compress_worker,
+                args=[running, raw_queue, latest, jpeg_quality, jpeg_scale],
+                daemon=True,
+            ).start()
+
+    def _stop_streaming() -> None:
+        nonlocal receiver
+        if receiver is not None:
+            receiver.shut_down()
+            receiver = None
+        camera.stop_liveview()
+        latest.frame = None
+        latest.counter += 1
+
+    def _stream_acquire() -> None:
+        nonlocal stream_clients
+        with stream_lock:
+            stream_clients += 1
+            if stream_clients == 1:
+                _start_streaming()
+
+    def _stream_release() -> None:
+        nonlocal stream_clients
+        with stream_lock:
+            stream_clients -= 1
+            if stream_clients == 0:
+                _stop_streaming()
 
     class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def do_GET(self):
             if self.path == "/stream":
                 self._stream_mjpeg()
@@ -443,12 +473,17 @@ def serve_stream(
             else:
                 self._serve_html()
 
-        def _json(self, data, status=200):
+        def _send(self, data: bytes, content_type: str, status: int = 200) -> None:
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(json.dumps(data, indent=2).encode())
+            self.wfile.write(data)
+
+        def _json(self, data, status=200):
+            self._send(json.dumps(data, indent=2).encode(), "application/json", status)
 
         def _json_api(self):
             if self.path == "/api":
@@ -468,7 +503,8 @@ def serve_stream(
                 ip = self.client_address[0]
                 uptime = "N/A"
                 try:
-                    uptime = open("/proc/uptime").read().split()[0]
+                    with open("/proc/uptime") as f:
+                        uptime = f.read().split()[0]
                 except OSError:
                     pass
                 self._json({"hostname": hostname, "ip": ip, "uptime": uptime})
@@ -487,10 +523,8 @@ def serve_stream(
                 self._json({"error": "not found"}, 404)
 
         def _serve_html(self):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"""<!DOCTYPE html>
+            self._send(
+                b"""<!DOCTYPE html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
@@ -503,48 +537,56 @@ img{display:block;width:100%;height:100%;object-fit:contain}
 <body>
 <img src="/stream">
 </body>
-</html>""")
+</html>""",
+                "text/html",
+            )
 
         def _stream_mjpeg(self):
-            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            _stream_acquire()
             try:
-                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)
-            except OSError:
-                pass
-            self.send_response(200)
-            self.send_header(
-                "Content-Type", "multipart/x-mixed-replace; boundary=frame"
-            )
-            self.send_header("Cache-Control", "no-cache, private")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            last_sent = 0
-            last_send_time = 0.0
-            while True:
-                with latest.condition:
-                    while latest.counter == last_sent:
-                        latest.condition.wait(timeout=5)
-                        if not running.is_set():
-                            return
-                    last_sent = latest.counter
-                    frame = latest.frame
-                if frame is None:
-                    continue
-                now = time.monotonic()
-                if now - last_send_time < frame_interval:
-                    continue
-                last_send_time = now
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 try:
-                    self.wfile.write(
-                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                        + str(len(frame)).encode()
-                        + b"\r\n\r\n"
-                        + frame
-                        + b"\r\n"
+                    self.connection.setsockopt(
+                        socket.SOL_SOCKET, socket.SO_SNDBUF, 262144
                     )
-                    self.wfile.flush()
                 except OSError:
-                    break
+                    pass
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type", "multipart/x-mixed-replace; boundary=frame"
+                )
+                self.send_header("Cache-Control", "no-cache, private")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                last_sent = 0
+                last_send_time = 0.0
+                while True:
+                    with latest.condition:
+                        while latest.counter == last_sent:
+                            latest.condition.wait(timeout=5)
+                            if not running.is_set():
+                                return
+                        last_sent = latest.counter
+                        frame = latest.frame
+                    if frame is None:
+                        continue
+                    now = time.monotonic()
+                    if now - last_send_time < frame_interval:
+                        continue
+                    last_send_time = now
+                    try:
+                        self.wfile.write(
+                            b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                            + str(len(frame)).encode()
+                            + b"\r\n\r\n"
+                            + frame
+                            + b"\r\n"
+                        )
+                        self.wfile.flush()
+                    except OSError:
+                        break
+            finally:
+                _stream_release()
 
         def log_message(self, format, *args):
             pass
@@ -560,5 +602,6 @@ img{display:block;width:100%;height:100%;object-fit:contain}
     running.clear()
     with latest.condition:
         latest.condition.notify_all()
-    receiver.shut_down()
-    camera.stop_liveview()
+    if receiver is not None:
+        receiver.shut_down()
+        camera.stop_liveview()
