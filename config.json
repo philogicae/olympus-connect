@@ -10,7 +10,7 @@
     "bind": "0.0.0.0",
     "jpeg_quality": 75,
     "jpeg_scale": 1.0,
-    "jpeg_optimize": true
+    "jpeg_optimize": false
   },
   "bluetooth": {
     "interface": "bt0",

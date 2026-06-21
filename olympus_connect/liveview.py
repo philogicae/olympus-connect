@@ -13,7 +13,7 @@ from .src.camera import OlympusCamera
 
 
 def compress_jpeg(
-    data: bytes, quality: int = 85, scale: float = 1.0, optimize: bool = True
+    data: bytes, quality: int = 85, scale: float = 1.0, optimize: bool = False
 ) -> bytes:
     if quality >= 95 and scale >= 1.0:
         return data
@@ -41,13 +41,15 @@ class LiveViewReceiver:
         img_queue: queue.SimpleQueue,
         jpeg_quality: int = 85,
         jpeg_scale: float = 1.0,
-        jpeg_optimize: bool = True,
+        jpeg_optimize: bool = False,
+        raw_mode: bool = False,
     ):
         self.running = True
         self.img_queue = img_queue
         self.jpeg_quality = jpeg_quality
         self.jpeg_scale = jpeg_scale
         self.jpeg_optimize = jpeg_optimize
+        self.raw_mode = raw_mode
         self.prev_sequence_number = 0
         self.assembling_frame = False
         self.frame = b""
@@ -111,12 +113,19 @@ class LiveViewReceiver:
             self.extension = b""
 
     def process_frame(self, frame: bytes) -> None:
-        if frame[:2] == b"\xff\xd8" and frame[-2:] == b"\xff\xd9":
+        if not (frame[:2] == b"\xff\xd8" and frame[-2:] == b"\xff\xd9"):
+            return
+        if self.img_queue.qsize() >= self.MAX_QUEUE_SIZE:
+            try:
+                self.img_queue.get_nowait()
+            except queue.Empty:
+                pass
+        if self.raw_mode:
+            self.img_queue.put((frame, self.extension))
+        else:
             compressed = compress_jpeg(
                 frame, self.jpeg_quality, self.jpeg_scale, self.jpeg_optimize
             )
-            if self.img_queue.qsize() >= self.MAX_QUEUE_SIZE:
-                self.img_queue.get()
             self.img_queue.put((compressed, self.extension))
 
 
@@ -333,6 +342,28 @@ class LiveViewWindow:
         self.window.destroy()
 
 
+def _compress_worker(
+    running: threading.Event,
+    raw_queue: queue.SimpleQueue,
+    out_queue: queue.SimpleQueue,
+    quality: int,
+    scale: float,
+    optimize: bool,
+) -> None:
+    while running.is_set():
+        try:
+            frame, ext = raw_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        compressed = compress_jpeg(frame, quality, scale, optimize)
+        if out_queue.qsize() >= 10:
+            try:
+                out_queue.get_nowait()
+            except queue.Empty:
+                pass
+        out_queue.put((compressed, ext))
+
+
 def serve_stream(
     camera: OlympusCamera,
     lvport: int | None = None,
@@ -358,17 +389,32 @@ def serve_stream(
         jpeg_quality if jpeg_quality is not None else cfg.get("jpeg_quality", 85)
     )
     jpeg_scale = jpeg_scale if jpeg_scale is not None else cfg.get("jpeg_scale", 1.0)
-    jpeg_optimize = (
-        jpeg_optimize if jpeg_optimize is not None else cfg.get("jpeg_optimize", True)
-    )
+    jpeg_optimize = False
 
-    q: queue.SimpleQueue = queue.SimpleQueue()
+    raw_queue: queue.SimpleQueue = queue.SimpleQueue()
+    out_queue: queue.SimpleQueue = queue.SimpleQueue()
 
     print(f"  starting liveview on port {lvport}...", file=sys.stderr)
     camera.start_liveview(port=lvport, lvqty=res)
-    receiver = LiveViewReceiver(q, jpeg_quality, jpeg_scale, jpeg_optimize)
+    receiver = LiveViewReceiver(raw_queue, raw_mode=True)
     t = threading.Thread(target=receiver.receive_packets, args=[lvport], daemon=True)
     t.start()
+
+    running = threading.Event()
+    running.set()
+    for _ in range(2):
+        threading.Thread(
+            target=_compress_worker,
+            args=[
+                running,
+                raw_queue,
+                out_queue,
+                jpeg_quality,
+                jpeg_scale,
+                jpeg_optimize,
+            ],
+            daemon=True,
+        ).start()
 
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -450,9 +496,14 @@ img{display:block;width:100%;height:100%;object-fit:contain}
             self.end_headers()
             while True:
                 try:
-                    jpeg, _ = q.get(timeout=1)
+                    jpeg, _ = out_queue.get(timeout=1)
                 except queue.Empty:
                     continue
+                while not out_queue.empty():
+                    try:
+                        jpeg, _ = out_queue.get_nowait()
+                    except queue.Empty:
+                        break
                 try:
                     self.wfile.write(
                         b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
@@ -471,5 +522,6 @@ img{display:block;width:100%;height:100%;object-fit:contain}
     except KeyboardInterrupt:
         print()
     server.shutdown()
+    running.clear()
     receiver.shut_down()
     camera.stop_liveview()
