@@ -7,6 +7,7 @@ import threading
 import time
 import tkinter
 import warnings
+from collections.abc import Callable
 
 from PIL import Image, ImageTk
 
@@ -14,17 +15,20 @@ from .src.camera import OlympusCamera
 
 
 def compress_jpeg(
-    data: bytes, quality: int = 85, scale: float = 1.0, optimize: bool = False
+    data: bytes | bytearray,
+    quality: int = 85,
+    scale: float = 1.0,
+    optimize: bool = False,
 ) -> bytes:
     if quality >= 95 and scale >= 1.0:
-        return data
+        return bytes(data)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             img = Image.open(io.BytesIO(data))
             img.load()
     except Exception:
-        return data
+        return bytes(data)
     if scale < 1.0:
         w = max(1, int(img.width * scale))
         h = max(1, int(img.height * scale))
@@ -39,11 +43,12 @@ class LiveViewReceiver:
 
     def __init__(
         self,
-        img_queue: queue.SimpleQueue,
+        img_queue: queue.SimpleQueue | None = None,
         jpeg_quality: int = 85,
         jpeg_scale: float = 1.0,
         jpeg_optimize: bool = False,
         raw_mode: bool = False,
+        frame_callback: Callable[[bytes], None] | None = None,
     ):
         self.running = True
         self.img_queue = img_queue
@@ -51,9 +56,10 @@ class LiveViewReceiver:
         self.jpeg_scale = jpeg_scale
         self.jpeg_optimize = jpeg_optimize
         self.raw_mode = raw_mode
+        self.frame_callback = frame_callback
         self.prev_sequence_number = 0
         self.assembling_frame = False
-        self.frame = b""
+        self.frame = bytearray()
         self.extension = b""
 
     def shut_down(self):
@@ -100,21 +106,26 @@ class LiveViewReceiver:
     def process_packet(self, packet: bytes) -> None:
         marker, sequence_number, payload = self.decode_rtp(packet)
         if self.assembling_frame:
-            self.frame += payload
+            self.frame.extend(payload)
             if (self.prev_sequence_number + 1) % 65536 != sequence_number:
                 self.assembling_frame = False
-                self.frame = b""
+                self.frame = bytearray()
                 self.extension = b""
         self.prev_sequence_number = sequence_number
         if marker:
             if self.frame:
                 self.process_frame(self.frame)
             self.assembling_frame = True
-            self.frame = b""
+            self.frame = bytearray()
             self.extension = b""
 
-    def process_frame(self, frame: bytes) -> None:
+    def process_frame(self, frame: bytearray) -> None:
         if not (frame[:2] == b"\xff\xd8" and frame[-2:] == b"\xff\xd9"):
+            return
+        if self.frame_callback is not None:
+            self.frame_callback(bytes(frame))
+            return
+        if self.img_queue is None:
             return
         if self.img_queue.qsize() >= self.MAX_QUEUE_SIZE:
             try:
@@ -122,7 +133,7 @@ class LiveViewReceiver:
             except queue.Empty:
                 pass
         if self.raw_mode:
-            self.img_queue.put((frame, self.extension))
+            self.img_queue.put((bytes(frame), self.extension))
         else:
             compressed = compress_jpeg(
                 frame, self.jpeg_quality, self.jpeg_scale, self.jpeg_optimize
@@ -343,26 +354,32 @@ class LiveViewWindow:
         self.window.destroy()
 
 
+class _LatestFrame:
+    def __init__(self):
+        self.frame = None
+        self.counter = 0
+        self.condition = threading.Condition()
+
+    def set(self, frame: bytes) -> None:
+        with self.condition:
+            self.frame = frame
+            self.counter += 1
+            self.condition.notify_all()
+
+
 def _compress_worker(
     running: threading.Event,
     raw_queue: queue.SimpleQueue,
-    out_queue: queue.SimpleQueue,
+    latest: _LatestFrame,
     quality: int,
     scale: float,
-    optimize: bool,
 ) -> None:
     while running.is_set():
         try:
-            frame, ext = raw_queue.get(timeout=0.5)
+            frame, _ = raw_queue.get(timeout=0.5)
         except queue.Empty:
             continue
-        compressed = compress_jpeg(frame, quality, scale, optimize)
-        if out_queue.qsize() >= 10:
-            try:
-                out_queue.get_nowait()
-            except queue.Empty:
-                pass
-        out_queue.put((compressed, ext))
+        latest.set(compress_jpeg(frame, quality, scale))
 
 
 def serve_stream(
@@ -371,7 +388,6 @@ def serve_stream(
     http_port: int | None = None,
     jpeg_quality: int | None = None,
     jpeg_scale: float | None = None,
-    jpeg_optimize: bool | None = None,
     max_fps: int | None = None,
 ):
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -391,32 +407,28 @@ def serve_stream(
         jpeg_quality if jpeg_quality is not None else cfg.get("jpeg_quality", 85)
     )
     jpeg_scale = jpeg_scale if jpeg_scale is not None else cfg.get("jpeg_scale", 1.0)
-    jpeg_optimize = False
     if max_fps is None:
         max_fps = cfg.get("max_fps", 15)
 
     raw_queue: queue.SimpleQueue = queue.SimpleQueue()
-    out_queue: queue.SimpleQueue = queue.SimpleQueue()
+    latest = _LatestFrame()
+    bypass_compress = jpeg_quality >= 95 and jpeg_scale >= 1.0
 
     print(f"  starting liveview on port {lvport}...", file=sys.stderr)
     camera.start_liveview(port=lvport, lvqty=res)
-    receiver = LiveViewReceiver(raw_queue, raw_mode=True)
+    if bypass_compress:
+        receiver = LiveViewReceiver(frame_callback=latest.set)
+    else:
+        receiver = LiveViewReceiver(raw_queue, raw_mode=True)
     t = threading.Thread(target=receiver.receive_packets, args=[lvport], daemon=True)
     t.start()
 
     running = threading.Event()
     running.set()
-    for _ in range(2):
+    if not bypass_compress:
         threading.Thread(
             target=_compress_worker,
-            args=[
-                running,
-                raw_queue,
-                out_queue,
-                jpeg_quality,
-                jpeg_scale,
-                jpeg_optimize,
-            ],
+            args=[running, raw_queue, latest, jpeg_quality, jpeg_scale],
             daemon=True,
         ).start()
 
@@ -494,31 +506,43 @@ img{display:block;width:100%;height:100%;object-fit:contain}
 </html>""")
 
         def _stream_mjpeg(self):
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)
+            except OSError:
+                pass
             self.send_response(200)
             self.send_header(
                 "Content-Type", "multipart/x-mixed-replace; boundary=frame"
             )
+            self.send_header("Cache-Control", "no-cache, private")
             self.send_header("Connection", "close")
             self.end_headers()
-            last_send = 0.0
+            last_sent = 0
+            last_send_time = 0.0
             while True:
-                try:
-                    jpeg, _ = out_queue.get(timeout=1)
-                except queue.Empty:
+                with latest.condition:
+                    while latest.counter == last_sent:
+                        latest.condition.wait(timeout=5)
+                        if not running.is_set():
+                            return
+                    last_sent = latest.counter
+                    frame = latest.frame
+                if frame is None:
                     continue
-                while not out_queue.empty():
-                    try:
-                        jpeg, _ = out_queue.get_nowait()
-                    except queue.Empty:
-                        break
                 now = time.monotonic()
-                if now - last_send < frame_interval:
+                if now - last_send_time < frame_interval:
                     continue
-                last_send = now
+                last_send_time = now
                 try:
                     self.wfile.write(
-                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                        + str(len(frame)).encode()
+                        + b"\r\n\r\n"
+                        + frame
+                        + b"\r\n"
                     )
+                    self.wfile.flush()
                 except OSError:
                     break
 
@@ -534,5 +558,7 @@ img{display:block;width:100%;height:100%;object-fit:contain}
         print()
     server.shutdown()
     running.clear()
+    with latest.condition:
+        latest.condition.notify_all()
     receiver.shut_down()
     camera.stop_liveview()

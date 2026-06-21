@@ -3,14 +3,15 @@
     "host": "192.168.0.10",
     "user_agent": "OI.Share v2",
     "live_port": 40000,
-    "live_resolution": "1920x1440"
+    "live_resolution": "0640x0480"
   },
   "server": {
     "http_port": 8080,
     "bind": "0.0.0.0",
     "jpeg_quality": 75,
     "jpeg_scale": 1.0,
-    "jpeg_optimize": false
+    "jpeg_optimize": false,
+    "max_fps": 15
   },
   "bluetooth": {
     "interface": "bt0",

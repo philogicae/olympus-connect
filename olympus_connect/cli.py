@@ -168,10 +168,10 @@ def main() -> None:
         if args.serve is not _SERVE_DEFAULT:
             serve_stream(
                 camera,
-                args.port,
-                args.serve,
-                args.quality,
-                args.scale,
+                lvport=args.port,
+                http_port=args.serve,
+                jpeg_quality=args.quality,
+                jpeg_scale=args.scale,
                 max_fps=args.fps,
             )
 

@@ -45,6 +45,7 @@ olympus-camera -s -Q 50             # lower JPEG quality for slower links
 olympus-camera -s -Q 75 -R 0.5     # half resolution at good quality
 olympus-camera -s -F 10            # cap at 10 fps for Bluetooth PAN
 olympus-camera -s -F 5 -Q 50 -R 0.5  # 5 fps at half-res for very slow links
+olympus-camera -s -Q 95               # bypass JPEG re-compression entirely (zero-copy passthrough)
 ```
 
 | Endpoint | Returns |
@@ -79,9 +80,10 @@ tkinter window with **File** (take picture, set clock, exit), **View** (resoluti
 ```json
 {
   "camera": { "host": "192.168.0.10", "user_agent": "OI.Share v2",
-              "live_port": 40000, "live_resolution": "1920x1440" },
+              "live_port": 40000, "live_resolution": "0640x0480" },
   "server": { "http_port": 8080, "bind": "0.0.0.0",
-              "jpeg_quality": 75, "jpeg_scale": 1.0, "jpeg_optimize": false },
+              "jpeg_quality": 75, "jpeg_scale": 1.0, "jpeg_optimize": false,
+              "max_fps": 15 },
   "bluetooth": { "interface": "bt0", "pan_ip": "192.168.44.1" },
   "download": { "output": "./camera-output" }
 }
@@ -117,7 +119,7 @@ Requires Python ≥ 3.14. tkinter needed for `--live` (`python3-tk` on Debian/Ub
 
 ## How it works
 
-Camera exposes `http://192.168.0.10/` (OPC Protocol 1.0a). Fetches `get_commandlist.cgi` to discover capabilities, sends GET/POST for commands, receives live view as RTP/MJPEG over UDP. The `--serve` path pipelines raw frame reception into a separate thread pool for JPEG re-compression (quality/scale) so UDP packet reception never blocks on CPU work. The HTTP handler rate-limits output to `--fps` frames per second and always serves the latest frame (skipping stale ones) to avoid saturating constrained links like Bluetooth PAN. The `--live` GUI path re-compresses inline in the receiver thread. Downloads are plain HTTP (camera is a file server).
+Camera exposes `http://192.168.0.10/` (OPC Protocol 1.0a). Fetches `get_commandlist.cgi` to discover capabilities, sends GET/POST for commands, receives live view as RTP/MJPEG over UDP. The `--serve` path pipelines raw frame reception into separate threads for JPEG re-compression (quality/scale) so UDP packet reception never blocks on CPU work. With `--quality 95` (or higher), JPEG re-compression is bypassed entirely — the receiver writes frames directly to a shared `threading.Condition` slot (zero-copy passthrough, no PIL, no queue). Frames are assembled with `bytearray` (O(1) per packet vs O(n) with `bytes +=`). The HTTP handler sets `TCP_NODELAY` to disable Nagle's algorithm, rate-limits output to `--fps`, and flushes after each frame. The `--live` GUI path re-compresses inline in the receiver thread. Downloads are plain HTTP (camera is a file server).
 
 ## Development
 
