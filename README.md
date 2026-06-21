@@ -29,6 +29,7 @@ olympus-camera --serve
 | `--port` / `-P` | UDP port for live view |
 | `--quality` / `-Q` | JPEG compression quality 1–100 (default 85) |
 | `--scale` / `-R` | Downscale factor e.g. `0.5` for half resolution (default 1.0) |
+| `--fps` / `-F` | Max frames per second to stream (default 15 for `--serve`) |
 
 | Binary | Action |
 |--------|--------|
@@ -42,6 +43,8 @@ olympus-camera --serve 9090         # explicit port
 olympus-camera -s 9090 -P 40001     # custom UDP + HTTP port
 olympus-camera -s -Q 50             # lower JPEG quality for slower links
 olympus-camera -s -Q 75 -R 0.5     # half resolution at good quality
+olympus-camera -s -F 10            # cap at 10 fps for Bluetooth PAN
+olympus-camera -s -F 5 -Q 50 -R 0.5  # 5 fps at half-res for very slow links
 ```
 
 | Endpoint | Returns |
@@ -94,6 +97,7 @@ tkinter window with **File** (take picture, set clock, exit), **View** (resoluti
 | `server.jpeg_quality` | JPEG re-compression quality 1–100 (default 85) |
 | `server.jpeg_scale` | Downscale factor (default 1.0) |
 | `server.jpeg_optimize` | JPEG Huffman optimization (smaller files, slower encode; disable for streaming) |
+| `server.max_fps` | Max frames per second to stream (default 15) |
 | `bluetooth.interface` | BT PAN network interface |
 | `bluetooth.pan_ip` | BT PAN IP for `/api/bluetooth` |
 | `download.output` | Download directory |
@@ -113,7 +117,7 @@ Requires Python ≥ 3.14. tkinter needed for `--live` (`python3-tk` on Debian/Ub
 
 ## How it works
 
-Camera exposes `http://192.168.0.10/` (OPC Protocol 1.0a). Fetches `get_commandlist.cgi` to discover capabilities, sends GET/POST for commands, receives live view as RTP/MJPEG over UDP. The `--serve` path pipelines raw frame reception into a separate thread pool for JPEG re-compression (quality/scale) so UDP packet reception never blocks on CPU work. The HTTP handler always serves the latest frame, skipping stale ones. The `--live` GUI path re-compresses inline in the receiver thread. Downloads are plain HTTP (camera is a file server).
+Camera exposes `http://192.168.0.10/` (OPC Protocol 1.0a). Fetches `get_commandlist.cgi` to discover capabilities, sends GET/POST for commands, receives live view as RTP/MJPEG over UDP. The `--serve` path pipelines raw frame reception into a separate thread pool for JPEG re-compression (quality/scale) so UDP packet reception never blocks on CPU work. The HTTP handler rate-limits output to `--fps` frames per second and always serves the latest frame (skipping stale ones) to avoid saturating constrained links like Bluetooth PAN. The `--live` GUI path re-compresses inline in the receiver thread. Downloads are plain HTTP (camera is a file server).
 
 ## Development
 

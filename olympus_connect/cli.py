@@ -104,6 +104,14 @@ def main() -> None:
         help="Downscale factor (e.g. 0.5 for half resolution). Default 1.0.",
     )
     parser.add_argument(
+        "--fps",
+        "-F",
+        type=int,
+        default=None,
+        metavar="FPS",
+        help="Max frames per second to stream (default 15 for --serve).",
+    )
+    parser.add_argument(
         "--cmd",
         "-C",
         type=str,
@@ -158,7 +166,14 @@ def main() -> None:
             LiveViewWindow(camera, args.port)
 
         if args.serve is not _SERVE_DEFAULT:
-            serve_stream(camera, args.port, args.serve, args.quality, args.scale)
+            serve_stream(
+                camera,
+                args.port,
+                args.serve,
+                args.quality,
+                args.scale,
+                max_fps=args.fps,
+            )
 
         if args.download:
             download_photos(camera, args.output, args.date_range, args.extension)

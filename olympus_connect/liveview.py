@@ -4,6 +4,7 @@ import queue
 import socket
 import sys
 import threading
+import time
 import tkinter
 import warnings
 
@@ -371,6 +372,7 @@ def serve_stream(
     jpeg_quality: int | None = None,
     jpeg_scale: float | None = None,
     jpeg_optimize: bool | None = None,
+    max_fps: int | None = None,
 ):
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
     from .config import get_config
@@ -390,6 +392,8 @@ def serve_stream(
     )
     jpeg_scale = jpeg_scale if jpeg_scale is not None else cfg.get("jpeg_scale", 1.0)
     jpeg_optimize = False
+    if max_fps is None:
+        max_fps = cfg.get("max_fps", 15)
 
     raw_queue: queue.SimpleQueue = queue.SimpleQueue()
     out_queue: queue.SimpleQueue = queue.SimpleQueue()
@@ -415,6 +419,8 @@ def serve_stream(
             ],
             daemon=True,
         ).start()
+
+    frame_interval = 1.0 / max_fps
 
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -494,6 +500,7 @@ img{display:block;width:100%;height:100%;object-fit:contain}
             )
             self.send_header("Connection", "close")
             self.end_headers()
+            last_send = 0.0
             while True:
                 try:
                     jpeg, _ = out_queue.get(timeout=1)
@@ -504,6 +511,10 @@ img{display:block;width:100%;height:100%;object-fit:contain}
                         jpeg, _ = out_queue.get_nowait()
                     except queue.Empty:
                         break
+                now = time.monotonic()
+                if now - last_send < frame_interval:
+                    continue
+                last_send = now
                 try:
                     self.wfile.write(
                         b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
